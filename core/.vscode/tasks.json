@@ -1,0 +1,62 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run and Build Project",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "${workspaceFolder}/scripts/windows/build.bat && cd ${workspaceFolder}/build/bin/Debug && timetable-gen.exe"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "detail": "Run the build script in Debug and run the executable"
+        },
+        {
+            "label": "Build Project in Debug",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "${workspaceFolder}/scripts/windows/build.bat"
+            ],
+            "group": {
+                "kind": "build",
+            },
+            "problemMatcher": [],
+            "detail": "Run the build script in Debug"
+        },
+        {
+            "label": "Build Project in Release",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "${workspaceFolder}/scripts/windows/build.bat Release"
+            ],
+            "group": {
+                "kind": "build",
+            },
+            "problemMatcher": [],
+            "detail": "Run the build script in Release"
+        },
+        {
+            "label": "Clean Project",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "${workspaceFolder}/scripts/windows/clean.bat"
+            ],
+            "group": {
+                "kind": "build"
+            },
+            "problemMatcher": [],
+            "detail": "Run the clean script to remove build files"
+        },
+    ]
+}
