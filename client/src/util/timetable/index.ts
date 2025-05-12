@@ -1045,6 +1045,23 @@ export class Timetable {
     // This is kept for compatibility with existing code
     return Promise.resolve(filename);
   }
+
+  /**
+   * Count the number of free first periods (soft constraint)
+   * @returns Number of free first periods
+   */
+  countFreeFirstPeriods(): number {
+    let count = 0;
+    for (const cls of this.classes) {
+      const schedule = this.schedule[cls.name];
+      for (let day = 0; day < DAYS; day++) {
+        if (schedule[day][0] === null) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }
 }
 
 /**
@@ -1109,7 +1126,7 @@ export class Scheduler {
           best = mutated.clone();
           bestFitness = mutatedFitness;
           stagnantIterations = 0;
-          
+
           // If we found a perfect solution (no conflicts), break early
           if (bestFitness === 0) {
             console.log(`Perfect solution found at iteration ${i}`);
@@ -1217,9 +1234,10 @@ export class Scheduler {
     const conflicts = timetable.countTeacherConflicts();
     const unscheduled = timetable.countUnscheduledPeriods();
     const emptySpacePenalty = timetable.countEmptySpacePenalty();
+    const freeFirstPeriods = timetable.countFreeFirstPeriods();
     
     // More aggressively prioritize eliminating teacher conflicts
-    return (conflicts * 50) + (unscheduled * 2) + emptySpacePenalty;
+    return (conflicts * 50) + (unscheduled * 2) + emptySpacePenalty + (freeFirstPeriods * 5);
   }
   
   /**
