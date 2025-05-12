@@ -44,27 +44,27 @@ const TeacherAvailabilityModal: React.FC<TeacherAvailabilityModalProps> = ({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl p-6 min-w-[400px] max-w-full">
+      <div className="bg-white rounded-lg shadow-xl p-6 min-w-[600px] max-w-full">
         <h2 className="text-xl font-bold mb-4">Edit Teacher Availability</h2>
         <div className="overflow-x-auto">
           <table className="border-collapse w-full">
             <thead>
               <tr>
                 <th className="p-2 border"></th>
-                {Array.from({ length: PERIODS_PER_DAY }, (_, p) => (
-                  <th key={p} className="p-2 border text-center">Period {p + 1}</th>
+                {dayNames.map((day, d) => (
+                  <th key={d} className="p-2 border text-center">{day}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {Array.from({ length: DAYS }, (_, d) => (
-                <tr key={d}>
-                  <th className="p-2 border text-left bg-gray-50">{dayNames[d]}</th>
-                  {Array.from({ length: PERIODS_PER_DAY }, (_, p) => {
+              {Array.from({ length: PERIODS_PER_DAY }, (_, p) => (
+                <tr key={p}>
+                  <th className="p-2 border text-left bg-gray-50">Period {p + 1}</th>
+                  {Array.from({ length: DAYS }, (_, d) => {
                     const available = editAvailability.get(d, p);
                     return (
                       <td
-                        key={p}
+                        key={d}
                         className={`p-2 border text-center cursor-pointer select-none ${
                           available ? "bg-green-400" : "bg-red-400"
                         }`}

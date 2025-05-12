@@ -35,7 +35,7 @@ const OverviewTab: React.FC<OverviewTabProps> = ({
         throw new Error(`These classes have no lessons: ${emptyClasses.map(c => c.name).join(', ')}`);
       }
       
-      const scheduler = new Scheduler(classes);
+      const scheduler = new Scheduler(classes, 10000);
       const timetable = scheduler.generateTimetable();
       
       onTimetableGenerated(timetable);

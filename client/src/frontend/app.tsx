@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Scheduler, Teacher, Class, Timetable, Availability, DAYS, PERIODS_PER_DAY } from "../util/timetable";
+import { Scheduler, Teacher, Class, Timetable, Availability, DAYS, PERIODS_PER_DAY, Lesson } from "../util/timetable";
 import Sidebar from "./components/Sidebar";
 import TeachersTab from "./components/TeachersTab";
 import ClassesTab from "./components/ClassesTab";
@@ -27,6 +27,18 @@ const isLocalStorageAvailable = (): boolean => {
     console.error("localStorage not available:", e);
     return false;
   }
+};
+
+// Helper function to properly reconstruct Teacher objects
+const reconstructTeacher = (teacherData: any): Teacher => {
+  // Create availability
+  const availability = new Availability(DAYS, PERIODS_PER_DAY);
+  if (teacherData.availability && Array.isArray(teacherData.availability.buffer)) {
+    availability.buffer = [...teacherData.availability.buffer];
+  }
+  
+  // Create teacher with proper prototype methods
+  return new Teacher(teacherData.name, availability);
 };
 
 function App() {
@@ -63,16 +75,9 @@ function App() {
         // Reconstruct objects with their methods
         if (parsedState.teachers && Array.isArray(parsedState.teachers)) {
           console.log(`Reconstructing ${parsedState.teachers.length} teachers`);
-          const reconstructedTeachers = parsedState.teachers.map((t: any) => {
-            let teacherAvailability: Availability;
-            if (t.availability && Array.isArray(t.availability.buffer)) {
-              teacherAvailability = new Availability(DAYS, PERIODS_PER_DAY);
-              teacherAvailability.buffer = [...t.availability.buffer];
-            } else {
-              teacherAvailability = new Availability(DAYS, PERIODS_PER_DAY);
-            }
-            return new Teacher(t.name, teacherAvailability);
-          });
+          const reconstructedTeachers = parsedState.teachers.map((t: any) => 
+            reconstructTeacher(t)
+          );
           setTeachers(reconstructedTeachers);
         }
         
@@ -81,15 +86,8 @@ function App() {
           const reconstructedClasses = parsedState.classes.map((c: any) => {
             // First reconstruct all the teachers for the lessons
             const lessons = c.lessons.map((l: any) => {
-              let teacherAvailability: Availability;
-              if (l.teacher.availability && Array.isArray(l.teacher.availability.buffer)) {
-                teacherAvailability = new Availability(DAYS, PERIODS_PER_DAY);
-                teacherAvailability.buffer = [...l.teacher.availability.buffer];
-              } else {
-                teacherAvailability = new Availability(DAYS, PERIODS_PER_DAY);
-              }
-              const teacher = new Teacher(l.teacher.name, teacherAvailability);
-              return { name: l.name, teacher, periodsPerWeek: l.periodsPerWeek };
+              const teacher = reconstructTeacher(l.teacher);
+              return new Lesson(l.name, teacher, l.periodsPerWeek);
             });
             return new Class(c.name, lessons);
           });
@@ -102,15 +100,8 @@ function App() {
             // Reconstruct classes first for the timetable
             const timetableClasses = parsedState.classes.map((c: any) => {
               const lessons = c.lessons.map((l: any) => {
-                let teacherAvailability: Availability;
-                if (l.teacher.availability && Array.isArray(l.teacher.availability.buffer)) {
-                  teacherAvailability = new Availability(DAYS, PERIODS_PER_DAY);
-                  teacherAvailability.buffer = [...l.teacher.availability.buffer];
-                } else {
-                  teacherAvailability = new Availability(DAYS, PERIODS_PER_DAY);
-                }
-                const teacher = new Teacher(l.teacher.name, teacherAvailability);
-                return { name: l.name, teacher, periodsPerWeek: l.periodsPerWeek };
+                const teacher = reconstructTeacher(l.teacher);
+                return new Lesson(l.name, teacher, l.periodsPerWeek);
               });
               return new Class(c.name, lessons);
             });
@@ -118,6 +109,30 @@ function App() {
             const timetable = new Timetable(timetableClasses);
             if (parsedState.generatedTimetable.schedule) {
               timetable.schedule = parsedState.generatedTimetable.schedule;
+              
+              // Make sure all lessons in the schedule have proper teacher objects
+              for (const className in timetable.schedule) {
+                const classSchedule = timetable.schedule[className];
+                for (let day = 0; day < DAYS; day++) {
+                  for (let period = 0; period < PERIODS_PER_DAY; period++) {
+                    const lesson = classSchedule[day][period];
+                    if (lesson && lesson.teacher) {
+                      // Replace teacher object with properly reconstructed one
+                      // Find the matching teacher from our list
+                      const matchingTeacher = timetableClasses
+                        .flatMap((c: Class) => c.lessons)
+                        .find((l: Lesson) => l.teacher.name === lesson.teacher.name)?.teacher;
+                      
+                      if (matchingTeacher) {
+                        lesson.teacher = matchingTeacher;
+                      } else {
+                        // If no matching teacher, reconstruct from data
+                        lesson.teacher = reconstructTeacher(lesson.teacher);
+                      }
+                    }
+                  }
+                }
+              }
             }
             setGeneratedTimetable(timetable);
           } catch (e) {

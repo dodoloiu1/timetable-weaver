@@ -1,6 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Timetable, DAYS, PERIODS_PER_DAY } from "../../util/timetable";
-import * as path from 'path';
 
 interface TimetableDisplayProps {
   timetable: Timetable;
@@ -13,8 +12,57 @@ const TimetableDisplay: React.FC<TimetableDisplayProps> = ({ timetable, onClose 
   const [isExporting, setIsExporting] = useState(false);
   const [exportSuccess, setExportSuccess] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
-  const [showFilenameDialog, setShowFilenameDialog] = useState(false);
-  const [customFilename, setCustomFilename] = useState("");
+  const [conflictDetails, setConflictDetails] = useState<{conflicts: number, teacherConflicts: {[key: string]: number}}>({
+    conflicts: 0,
+    teacherConflicts: {}
+  });
+  
+  useEffect(() => {
+    // Calculate detailed conflict information on component mount
+    calculateDetailedConflicts();
+  }, [timetable]);
+  
+  const calculateDetailedConflicts = () => {
+    const teacherConflictMap: {[key: string]: number} = {};
+    let totalConflicts = 0;
+    
+    // Check for teacher double-booking and availability conflicts
+    for (let day = 0; day < DAYS; day++) {
+      for (let period = 0; period < PERIODS_PER_DAY; period++) {
+        const teacherUsage: {[key: string]: number} = {};
+        
+        // Count teachers in this time slot
+        for (const cls of timetable.classes) {
+          const lesson = timetable.schedule[cls.name][day][period];
+          if (lesson) {
+            const teacher = lesson.teacher;
+            
+            // Check teacher availability
+            if (!teacher.isAvailable(day, period)) {
+              totalConflicts++;
+              teacherConflictMap[teacher.name] = (teacherConflictMap[teacher.name] || 0) + 1;
+            }
+            
+            // Count teachers for double-booking
+            teacherUsage[teacher.name] = (teacherUsage[teacher.name] || 0) + 1;
+          }
+        }
+        
+        // Count double-bookings as conflicts
+        for (const [teacherName, count] of Object.entries(teacherUsage)) {
+          if (count > 1) {
+            teacherConflictMap[teacherName] = (teacherConflictMap[teacherName] || 0) + (count - 1);
+            totalConflicts += (count - 1);
+          }
+        }
+      }
+    }
+    
+    setConflictDetails({
+      conflicts: totalConflicts,
+      teacherConflicts: teacherConflictMap
+    });
+  };
   
   const getConflicts = () => {
     const conflicts = timetable.countTeacherConflicts();
@@ -29,48 +77,21 @@ const TimetableDisplay: React.FC<TimetableDisplayProps> = ({ timetable, onClose 
     };
   };
   
-  const handleInitiateExport = () => {
-    // Default filename with timestamp
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-    const defaultFilename = `timetable-${timestamp}`;
-    setCustomFilename(defaultFilename);
-    setShowFilenameDialog(true);
-  };
-  
   const handleExportToPDF = async () => {
     setIsExporting(true);
     setExportSuccess(null);
     setExportError(null);
-    setShowFilenameDialog(false);
     
     try {
-      // Get the user's documents folder for the default path
-      const homePath = window.navigator.platform.toLowerCase().includes('win') 
-        ? import.meta.env.USERPROFILE || 'C:\\Users\\user\\Documents'
-        : import.meta.env.HOME || '/home/user/Documents';
-      const documentsPath = path.join(homePath, 'Documents');
-      
-      // Clean up filename to ensure it has .pdf extension
-      const filename = customFilename.trim().endsWith('.pdf') 
-        ? customFilename.trim() 
-        : `${customFilename.trim()}.pdf`;
-      
-      const defaultPath = path.join(documentsPath, filename);
-      
-      // Show save dialog to let user choose location and filename
-      const selectedPath = await backend.showSaveDialog(defaultPath);
-      
-      if (!selectedPath) {
-        // User canceled the dialog
-        setIsExporting(false);
-        return;
-      }
+      // Default filename with timestamp
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+      const filename = `timetable-${timestamp}.pdf`;
       
       // Generate HTML for the timetable
       const html = timetable.generateHtml();
       
-      // Use the Electron backend to create PDF at the selected path
-      const exportedFile = await backend.exportTimetablePdf(html, selectedPath);
+      // Use the Electron backend to create PDF
+      const exportedFile = await backend.exportTimetablePdf(html, filename);
       setExportSuccess(`Timetable exported to ${exportedFile}`);
     } catch (error) {
       console.error("Error exporting to PDF:", error);
@@ -78,6 +99,29 @@ const TimetableDisplay: React.FC<TimetableDisplayProps> = ({ timetable, onClose 
     } finally {
       setIsExporting(false);
     }
+  };
+  
+  // Check if a specific cell has a conflict
+  const hasCellConflict = (className: string, day: number, period: number) => {
+    const lesson = timetable.schedule[className][day][period];
+    if (!lesson) return false;
+    
+    // Check if teacher is available at this time
+    if (!lesson.teacher.isAvailable(day, period)) {
+      return true;
+    }
+    
+    // Check if teacher is double-booked
+    for (const cls of timetable.classes) {
+      if (cls.name === className) continue;
+      
+      const otherLesson = timetable.schedule[cls.name][day][period];
+      if (otherLesson && otherLesson.teacher.name === lesson.teacher.name) {
+        return true;
+      }
+    }
+    
+    return false;
   };
   
   const metrics = getConflicts();
@@ -126,6 +170,24 @@ const TimetableDisplay: React.FC<TimetableDisplayProps> = ({ timetable, onClose 
             </div>
           </div>
           
+          {/* Show conflict details if any conflicts exist */}
+          {metrics.conflicts > 0 && (
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+              <h3 className="text-lg font-semibold text-red-700 mb-2">Teacher Conflict Details</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {Object.entries(conflictDetails.teacherConflicts).map(([teacher, count]) => (
+                  <div key={teacher} className="flex justify-between items-center border-b border-red-100 py-1">
+                    <span className="font-medium">{teacher}</span>
+                    <span className="bg-red-100 text-red-800 px-2 py-1 rounded">{count} conflicts</span>
+                  </div>
+                ))}
+                {Object.keys(conflictDetails.teacherConflicts).length === 0 && (
+                  <p className="text-gray-600 italic">No specific teacher conflicts found.</p>
+                )}
+              </div>
+            </div>
+          )}
+          
           {timetable.classes.map((cls, idx) => (
             <div key={idx} className="mb-8">
               <h3 className="text-xl font-semibold mb-4">Class {cls.name}</h3>
@@ -134,23 +196,37 @@ const TimetableDisplay: React.FC<TimetableDisplayProps> = ({ timetable, onClose 
                   <thead>
                     <tr className="bg-gray-100">
                       <th className="p-2 border"></th>
-                      {periodNames.map((period, idx) => (
-                        <th key={idx} className="p-2 border text-center">{period}</th>
+                      {dayNames.map((day, idx) => (
+                        <th key={idx} className="p-2 border text-center">{day}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {dayNames.map((day, dayIndex) => (
-                      <tr key={dayIndex} className="hover:bg-gray-50">
-                        <th className="p-2 border bg-gray-50">{day}</th>
-                        {Array.from({ length: PERIODS_PER_DAY }, (_, periodIndex) => {
+                    {periodNames.map((period, periodIndex) => (
+                      <tr key={periodIndex} className="hover:bg-gray-50">
+                        <th className="p-2 border bg-gray-50">{period}</th>
+                        {dayNames.map((_, dayIndex) => {
                           const lesson = timetable.schedule[cls.name][dayIndex][periodIndex];
+                          const hasConflict = hasCellConflict(cls.name, dayIndex, periodIndex);
+                          
                           return (
-                            <td key={periodIndex} className="p-2 border text-center">
+                            <td 
+                              key={dayIndex} 
+                              className={`p-2 border text-center ${hasConflict ? 'bg-red-100' : ''}`}
+                            >
                               {lesson ? (
                                 <div>
-                                  <div className="font-medium">{lesson.name}</div>
-                                  <div className="text-sm text-gray-600">{lesson.teacher.name}</div>
+                                  <div className={`font-medium ${hasConflict ? 'text-red-700' : ''}`}>
+                                    {lesson.name}
+                                  </div>
+                                  <div className={`text-sm ${hasConflict ? 'text-red-600' : 'text-gray-600'}`}>
+                                    {lesson.teacher.name}
+                                    {hasConflict && (
+                                      <span className="ml-1 text-xs bg-red-200 text-red-800 px-1 rounded">
+                                        Conflict
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
                               ) : (
                                 <span className="text-gray-400">Free</span>
@@ -187,7 +263,7 @@ const TimetableDisplay: React.FC<TimetableDisplayProps> = ({ timetable, onClose 
             </button>
             
             <button
-              onClick={handleInitiateExport}
+              onClick={handleExportToPDF}
               disabled={isExporting}
               className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
             >
@@ -196,50 +272,6 @@ const TimetableDisplay: React.FC<TimetableDisplayProps> = ({ timetable, onClose 
           </div>
         </div>
       </div>
-      
-      {/* Filename Dialog */}
-      {showFilenameDialog && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60]">
-          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full">
-            <h3 className="text-xl font-bold mb-4">Export Timetable to PDF</h3>
-            <p className="mb-4 text-gray-600">
-              Enter a name for your PDF file. You'll be able to choose where to save it in the next step.
-            </p>
-            
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Filename
-              </label>
-              <div className="flex items-center">
-                <input
-                  type="text"
-                  value={customFilename}
-                  onChange={(e) => setCustomFilename(e.target.value)}
-                  className="flex-1 p-2 border rounded"
-                  placeholder="Enter filename"
-                />
-                <span className="ml-2 text-gray-500">.pdf</span>
-              </div>
-            </div>
-            
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowFilenameDialog(false)}
-                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleExportToPDF}
-                disabled={!customFilename.trim()}
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded disabled:bg-gray-400 disabled:cursor-not-allowed"
-              >
-                Continue
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
