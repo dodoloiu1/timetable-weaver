@@ -281,6 +281,7 @@ export class Timetable {
    * @private
    */
   private initializeNoGaps(): void {
+    // First attempt: place lessons only in available slots
     for (const cls of this.classes) {
       const schedule = this.schedule[cls.name];
       let lessonQueue: Lesson[] = [];
@@ -289,50 +290,71 @@ export class Timetable {
           lessonQueue.push(lesson);
         }
       }
-      for (let i = lessonQueue.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [lessonQueue[i], lessonQueue[j]] = [lessonQueue[j], lessonQueue[i]];
-      }
+      
+      // Prioritize lessons with more constrained teachers (fewer available slots)
+      lessonQueue.sort((a, b) => {
+        const aSlots = a.teacher.getAvailableSlots().length;
+        const bSlots = b.teacher.getAvailableSlots().length;
+        return aSlots - bSlots; // Most constrained first
+      });
+      
       let idx = 0;
       let unscheduledLessons: string[] = [];
-      for (let day = 0; day < DAYS; day++) {
-        for (let period = 0; period < PERIODS_PER_DAY; period++) {
-          if (idx < lessonQueue.length) {
-            const lesson = lessonQueue[idx];
-            if (
-              lesson.teacher.isAvailable(day, period) &&
-              !this.isTeacherBusy(lesson.teacher, day, period, cls.name)
-            ) {
-              schedule[day][period] = lesson;
-              idx++;
-            } else {
-              let found = false;
-              for (let d = day; d < DAYS && !found; d++) {
-                for (let p = (d === day ? period + 1 : 0); p < PERIODS_PER_DAY; p++) {
-                  if (
-                    schedule[d][p] === null &&
-                    lesson.teacher.isAvailable(d, p) &&
-                    !this.isTeacherBusy(lesson.teacher, d, p, cls.name)
-                  ) {
-                    schedule[d][p] = lesson;
-                    idx++;
-                    found = true;
-                    break;
-                  }
-                }
-              }
-              if (!found) {
-                unscheduledLessons.push(lesson.name + ' (' + lesson.teacher.name + ')');
-                idx++;
+      
+      // First pass: only place in slots where teacher is available
+      while (idx < lessonQueue.length) {
+        const lesson = lessonQueue[idx];
+        let placed = false;
+        
+        // Get all available slots for this teacher
+        const availableSlots = lesson.teacher.getAvailableSlots();
+        
+        // Shuffle to randomize placement while respecting constraints
+        this.shuffleArray(availableSlots);
+        
+        for (const slot of availableSlots) {
+          const { day, period } = slot;
+          if (
+            schedule[day][period] === null && 
+            !this.isTeacherBusy(lesson.teacher, day, period, cls.name)
+          ) {
+            schedule[day][period] = lesson;
+            placed = true;
+            break;
+          }
+        }
+        
+        if (placed) {
+          lessonQueue.splice(idx, 1); // Remove the placed lesson
+        } else {
+          // If we couldn't place it, move to the next lesson and try again later
+          idx++;
+        }
+      }
+      
+      // If there are still unplaced lessons, try a more aggressive approach
+      if (lessonQueue.length > 0) {
+        unscheduledLessons = lessonQueue.map(l => l.name + ' (' + l.teacher.name + ')');
+        console.warn(`Class ${cls.name}: Could not schedule some lessons due to teacher constraints: ${unscheduledLessons.join(', ')}`);
+        
+        // Place remaining lessons in any available slots, even if not ideal
+        for (const lesson of lessonQueue) {
+          let placed = false;
+          
+          // Try to find any empty slot
+          for (let day = 0; day < DAYS && !placed; day++) {
+            for (let period = 0; period < PERIODS_PER_DAY && !placed; period++) {
+              if (schedule[day][period] === null) {
+                schedule[day][period] = lesson;
+                placed = true;
               }
             }
           }
         }
       }
-      if (unscheduledLessons.length > 0) {
-        console.warn(`Class ${cls.name}: Could not schedule lessons due to teacher conflicts or availability: ${unscheduledLessons.join(', ')}`);
-      }
     }
+    
+    // Make sure we don't have gaps
     this.compactSchedule();
   }
 
@@ -346,12 +368,20 @@ export class Timetable {
    * @private
    */
   private isTeacherBusy(teacher: Teacher, day: number, period: number, skipClassName: string): boolean {
+    // First check: teacher must be available at this time
+    if (!teacher.isAvailable(day, period)) {
+      return true;
+    }
+    
+    // Second check: teacher must not be teaching another class at this time
     for (const cls of this.classes) {
       if (cls.name === skipClassName) continue;
-      if (this.schedule[cls.name][day][period] && this.schedule[cls.name][day][period]?.teacher === teacher) {
+      const lesson = this.schedule[cls.name][day][period];
+      if (lesson && lesson.teacher.name === teacher.name) {
         return true;
       }
     }
+    
     return false;
   }
 
@@ -549,6 +579,148 @@ export class Timetable {
    */
   mutate(): Timetable {
     const clone = this.clone();
+    
+    // First check if we have any teacher availability conflicts
+    let hasAvailabilityConflicts = false;
+    let conflictingClasses: {className: string, day: number, period: number}[] = [];
+    
+    // Identify all conflicts in the timetable
+    for (let day = 0; day < DAYS; day++) {
+      for (let period = 0; period < PERIODS_PER_DAY; period++) {
+        const teacherMap = new Map<string, string[]>();
+        
+        for (const cls of this.classes) {
+          const lesson = clone.schedule[cls.name][day][period];
+          if (lesson) {
+            const teacher = lesson.teacher;
+            
+            // Check if teacher is available at this time
+            if (!teacher.isAvailable(day, period)) {
+              hasAvailabilityConflicts = true;
+              conflictingClasses.push({className: cls.name, day, period});
+            }
+            
+            // Check for double bookings
+            if (!teacherMap.has(teacher.name)) {
+              teacherMap.set(teacher.name, [cls.name]);
+            } else {
+              // This is a double booking
+              teacherMap.get(teacher.name)!.push(cls.name);
+              
+              // Add conflict for all classes with this teacher at this time slot
+              const classesWithTeacher = teacherMap.get(teacher.name)!;
+              for (const conflictClass of classesWithTeacher) {
+                if (conflictClass === classesWithTeacher[0]) {
+                  // We already added this in the first encounter
+                  continue;
+                }
+                conflictingClasses.push({className: conflictClass, day, period});
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    // If we have conflicts, prioritize resolving them
+    if (conflictingClasses.length > 0) {
+      // Randomly select one conflict to resolve
+      const randomIndex = Math.floor(Math.random() * conflictingClasses.length);
+      const conflict = conflictingClasses[randomIndex];
+      
+      // Try to move the lesson to a better slot
+      const moved = this.moveLessonToAvailableSlot(clone, conflict.className, conflict.day, conflict.period);
+      
+      // If we couldn't move it, try a more aggressive approach
+      if (!moved) {
+        // Reset and rebuild the schedule for this conflicting class
+        const className = conflict.className;
+        
+        // Clear the schedule for this class
+        for (let day = 0; day < DAYS; day++) {
+          for (let period = 0; period < PERIODS_PER_DAY; period++) {
+            clone.schedule[className][day][period] = null;
+          }
+        }
+        
+        // Collect all lessons for this class
+        const classObj = this.classes.find(c => c.name === className)!;
+        let lessonQueue: Lesson[] = [];
+        for (const lesson of classObj.lessons) {
+          for (let i = 0; i < lesson.periodsPerWeek; i++) {
+            lessonQueue.push(lesson);
+          }
+        }
+        
+        // Prioritize lessons with limited availability
+        lessonQueue.sort((a, b) => {
+          const aSlots = a.teacher.getAvailableSlots().length;
+          const bSlots = b.teacher.getAvailableSlots().length;
+          return aSlots - bSlots; // Most constrained first
+        });
+        
+        // Place lessons in valid slots
+        let placedAll = true;
+        for (const lesson of lessonQueue) {
+          let placed = false;
+          
+          // Get all available slots for this teacher
+          const availableSlots = lesson.teacher.getAvailableSlots();
+          this.shuffleArray(availableSlots);
+          
+          for (const slot of availableSlots) {
+            const { day, period } = slot;
+            if (
+              clone.schedule[className][day][period] === null && 
+              !this.isTeacherBusy(lesson.teacher, day, period, className)
+            ) {
+              clone.schedule[className][day][period] = lesson;
+              placed = true;
+              break;
+            }
+          }
+          
+          // If we couldn't find a valid slot, try any open slot
+          if (!placed) {
+            for (let day = 0; day < DAYS && !placed; day++) {
+              for (let period = 0; period < PERIODS_PER_DAY && !placed; period++) {
+                if (clone.schedule[className][day][period] === null) {
+                  // We're forced to schedule in a non-optimal slot
+                  clone.schedule[className][day][period] = lesson;
+                  placed = true;
+                }
+              }
+            }
+            
+            if (!placed) {
+              placedAll = false;
+            }
+          }
+        }
+        
+        // Compact to avoid gaps
+        clone.compactSchedule();
+        
+        // If we couldn't place all lessons, try a totally different mutation
+        if (!placedAll) {
+          return this.randomMutation();
+        }
+      }
+    } else {
+      // If no conflicts, do a standard mutation to improve the timetable
+      return this.randomMutation();
+    }
+    
+    return clone;
+  }
+
+  /**
+   * Create a random mutation for variety
+   * @returns Mutated timetable
+   * @private
+   */
+  private randomMutation(): Timetable {
+    const clone = this.clone();
     const mutationType = Math.random();
     
     // Choose a random class and day for mutation
@@ -556,7 +728,7 @@ export class Timetable {
     const randomClass = this.classes[randomClassIndex];
     const randomDay = Math.floor(Math.random() * DAYS);
     
-    if (mutationType < 0.4) {
+    if (mutationType < 0.5) {
       // Swap two random periods within the same day for a class
       const schedule = clone.schedule[randomClass.name];
       
@@ -578,168 +750,50 @@ export class Timetable {
         [schedule[randomDay][period1], schedule[randomDay][period2]] = 
           [schedule[randomDay][period2], schedule[randomDay][period1]];
       }
-    } else if (mutationType < 0.7) {
-      // Try to resolve a teacher conflict by moving a lesson
-      let conflictFound = false;
-      
-      // Find a conflict to resolve
-      for (let day = 0; day < DAYS && !conflictFound; day++) {
-        for (let period = 0; period < PERIODS_PER_DAY && !conflictFound; period++) {
-          // Check for teacher conflicts in this time slot
-          const teacherUsage = new Map<string, {count: number, className: string}>();
-          
-          for (const cls of this.classes) {
-            const lesson = clone.schedule[cls.name][day][period];
-            if (lesson) {
-              const teacher = lesson.teacher;
-              
-              // Check teacher availability
-              if (!teacher.isAvailable(day, period)) {
-                // Found a teacher assigned to a slot they're not available in
-                // Try to move this lesson to a slot where the teacher is available
-                conflictFound = this.moveLessonToAvailableSlot(clone, cls.name, day, period);
-                if (conflictFound) break;
-              }
-              
-              // Check for double-booked teachers
-              if (!teacherUsage.has(teacher.name)) {
-                teacherUsage.set(teacher.name, {count: 1, className: cls.name});
-              } else {
-                const usage = teacherUsage.get(teacher.name)!;
-                usage.count++;
-                
-                if (usage.count > 1) {
-                  // Found a teacher assigned to multiple classes in the same slot
-                  // Try to move this lesson to a different time slot
-                  conflictFound = this.moveLessonToAvailableSlot(clone, cls.name, day, period);
-                  if (conflictFound) break;
-                }
-              }
-            }
-          }
-        }
-      }
-      
-      // If no conflicts were found or couldn't be resolved, try random swaps
-      if (!conflictFound) {
-        // Find two random days
-        const day1 = Math.floor(Math.random() * DAYS);
-        let day2 = Math.floor(Math.random() * DAYS);
-        if (day1 === day2) day2 = (day2 + 1) % DAYS;
-        
-        // Find periods with lessons on both days
-        const periods1: number[] = [];
-        const periods2: number[] = [];
-        
-        for (let p = 0; p < PERIODS_PER_DAY; p++) {
-          if (clone.schedule[randomClass.name][day1][p] !== null) {
-            periods1.push(p);
-          }
-          if (clone.schedule[randomClass.name][day2][p] !== null) {
-            periods2.push(p);
-          }
-        }
-        
-        if (periods1.length > 0 && periods2.length > 0) {
-          const period1 = periods1[Math.floor(Math.random() * periods1.length)];
-          const period2 = periods2[Math.floor(Math.random() * periods2.length)];
-          
-          // Swap the lessons between days
-          [clone.schedule[randomClass.name][day1][period1], clone.schedule[randomClass.name][day2][period2]] = 
-            [clone.schedule[randomClass.name][day2][period2], clone.schedule[randomClass.name][day1][period1]];
-        }
-      }
     } else {
-      // Try a more aggressive mutation to solve difficult conflicts
-      // Randomly select a class that has conflicts
-      let conflictingClasses: string[] = [];
+      // Swap lessons between two days
+      const day1 = Math.floor(Math.random() * DAYS);
+      let day2 = Math.floor(Math.random() * DAYS);
+      if (day1 === day2) day2 = (day2 + 1) % DAYS;
       
-      for (let day = 0; day < DAYS; day++) {
-        for (let period = 0; period < PERIODS_PER_DAY; period++) {
-          const teacherMap = new Map<string, string[]>();
-          
-          for (const cls of this.classes) {
-            const lesson = clone.schedule[cls.name][day][period];
-            if (lesson) {
-              const teacher = lesson.teacher;
-              
-              // Check availability
-              if (!teacher.isAvailable(day, period)) {
-                if (!conflictingClasses.includes(cls.name)) {
-                  conflictingClasses.push(cls.name);
-                }
-              }
-              
-              // Check double booking
-              if (!teacherMap.has(teacher.name)) {
-                teacherMap.set(teacher.name, [cls.name]);
-              } else {
-                teacherMap.get(teacher.name)!.push(cls.name);
-                
-                // Add all classes with this teacher in this time slot
-                for (const conflictClass of teacherMap.get(teacher.name)!) {
-                  if (!conflictingClasses.includes(conflictClass)) {
-                    conflictingClasses.push(conflictClass);
-                  }
-                }
-              }
-            }
-          }
+      // Find periods with lessons on both days
+      const periods1: number[] = [];
+      const periods2: number[] = [];
+      
+      for (let p = 0; p < PERIODS_PER_DAY; p++) {
+        if (clone.schedule[randomClass.name][day1][p] !== null) {
+          periods1.push(p);
+        }
+        if (clone.schedule[randomClass.name][day2][p] !== null) {
+          periods2.push(p);
         }
       }
       
-      if (conflictingClasses.length > 0) {
-        const targetClass = conflictingClasses[Math.floor(Math.random() * conflictingClasses.length)];
+      if (periods1.length > 0 && periods2.length > 0) {
+        const period1 = periods1[Math.floor(Math.random() * periods1.length)];
+        const period2 = periods2[Math.floor(Math.random() * periods2.length)];
         
-        // Reset and rebuild schedule for this class
-        for (let day = 0; day < DAYS; day++) {
-          for (let period = 0; period < PERIODS_PER_DAY; period++) {
-            clone.schedule[targetClass][day][period] = null;
-          }
-        }
+        const lesson1 = clone.schedule[randomClass.name][day1][period1];
+        const lesson2 = clone.schedule[randomClass.name][day2][period2];
         
-        // Get all lessons for this class
-        const classObj = this.classes.find(c => c.name === targetClass)!;
-        let lessonQueue: Lesson[] = [];
-        for (const lesson of classObj.lessons) {
-          for (let i = 0; i < lesson.periodsPerWeek; i++) {
-            lessonQueue.push(lesson);
-          }
-        }
-        
-        this.shuffleArray(lessonQueue);
-        
-        // Try to place lessons in conflict-free slots
-        for (const lesson of lessonQueue) {
-          let placed = false;
+        // Check that the swap doesn't create new conflicts
+        if (lesson1 && lesson2) {
+          const teacher1 = lesson1.teacher;
+          const teacher2 = lesson2.teacher;
           
-          // First try to place in slots where teacher is available and not busy
-          for (let day = 0; day < DAYS && !placed; day++) {
-            for (let period = 0; period < PERIODS_PER_DAY && !placed; period++) {
-              if (clone.schedule[targetClass][day][period] === null && 
-                  lesson.teacher.isAvailable(day, period) && 
-                  !this.isTeacherBusy(lesson.teacher, day, period, targetClass)) {
-                clone.schedule[targetClass][day][period] = lesson;
-                placed = true;
-              }
-            }
-          }
+          const teacher1CanSwap = teacher1.isAvailable(day2, period2) && 
+              !this.isTeacherBusy(teacher1, day2, period2, randomClass.name);
           
-          // If still not placed, try any available slot
-          if (!placed) {
-            for (let day = 0; day < DAYS && !placed; day++) {
-              for (let period = 0; period < PERIODS_PER_DAY && !placed; period++) {
-                if (clone.schedule[targetClass][day][period] === null) {
-                  clone.schedule[targetClass][day][period] = lesson;
-                  placed = true;
-                }
-              }
-            }
+          const teacher2CanSwap = teacher2.isAvailable(day1, period1) && 
+              !this.isTeacherBusy(teacher2, day1, period1, randomClass.name);
+          
+          // Only swap if it doesn't create new conflicts
+          if (teacher1CanSwap && teacher2CanSwap) {
+            // Swap the lessons
+            [clone.schedule[randomClass.name][day1][period1], clone.schedule[randomClass.name][day2][period2]] = 
+              [clone.schedule[randomClass.name][day2][period2], clone.schedule[randomClass.name][day1][period1]];
           }
         }
-        
-        // Compact to avoid gaps
-        clone.compactSchedule();
       }
     }
     
@@ -1019,8 +1073,8 @@ export class Scheduler {
    */
   generateTimetable(): Timetable {
     // Increase default iterations for better results
-    const maxIterations = this.maxIterations * 2;
-    const maxStagnantIterations = this.maxStagnantIterations * 2;
+    const maxIterations = this.maxIterations * 5; // 5x more iterations for thorough search
+    const maxStagnantIterations = this.maxStagnantIterations * 3; // 3x more stagnant iterations allowed
     
     let current = new Timetable(this.classes);
     
@@ -1029,8 +1083,8 @@ export class Scheduler {
     let bestFitness = currentFitness;
     
     let temperature = 1.0;
-    const coolingRate = 0.997; // Slower cooling for more thorough search
-    const minTemperature = 0.001; // Lower min temperature for more thorough search
+    const coolingRate = 0.998; // Even slower cooling for more thorough search
+    const minTemperature = 0.0001; // Lower min temperature for more thorough search
     
     let stagnantIterations = 0;
     
@@ -1094,7 +1148,7 @@ export class Scheduler {
         currentFitness = bestFitness;
         
         // Use a more aggressive mutation to escape local minimum
-        for (let m = 0; m < 5; m++) {
+        for (let m = 0; m < 10; m++) { // Increased from 5 to 10 mutations
           current = current.mutate();
         }
         
@@ -1116,8 +1170,8 @@ export class Scheduler {
       let conflictBest = best.clone();
       let conflictBestScore = best.countTeacherConflicts();
       
-      // Short focused pass to try to eliminate remaining conflicts
-      for (let i = 0; i < 500 && conflictBestScore > 0; i++) {
+      // Extended focused pass to try to eliminate remaining conflicts
+      for (let i = 0; i < 2000 && conflictBestScore > 0; i++) { // Increased from 500 to 2000 iterations
         const mutated = conflictBest.mutate();
         const conflicts = mutated.countTeacherConflicts();
         
@@ -1130,6 +1184,18 @@ export class Scheduler {
             console.log(`All conflicts eliminated at iteration ${i}`);
             break;
           }
+        }
+        
+        // Every 500 iterations, try a more aggressive approach
+        if (i % 500 === 0 && i > 0 && conflictBestScore > 0) {
+          console.log(`Still have ${conflictBestScore} conflicts after ${i} iterations, trying aggressive mutation`);
+          
+          // Apply multiple mutations to escape local minimum
+          for (let m = 0; m < 5; m++) {
+            conflictBest = conflictBest.mutate();
+          }
+          
+          conflictBestScore = conflictBest.countTeacherConflicts();
         }
       }
       
@@ -1152,8 +1218,8 @@ export class Scheduler {
     const unscheduled = timetable.countUnscheduledPeriods();
     const emptySpacePenalty = timetable.countEmptySpacePenalty();
     
-    // Heavily prioritize eliminating teacher conflicts
-    return (conflicts * 10) + (unscheduled * 2) + emptySpacePenalty;
+    // More aggressively prioritize eliminating teacher conflicts
+    return (conflicts * 50) + (unscheduled * 2) + emptySpacePenalty;
   }
   
   /**
